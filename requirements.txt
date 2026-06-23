@@ -1,0 +1,5 @@
+aiogram==3.13.0
+youtube-transcript-api
+gigachat
+python-docx
+python-dotenv
