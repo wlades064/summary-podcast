@@ -43,63 +43,73 @@ SUMMARY_PROMPT = """
 async def handle_link(message: types.Message):
     url = message.text.strip()
     if "youtube.com" not in url and "youtu.be" not in url:
-        await message.answer("Пришли ссылку на YouTube")
+        await message.answer("❌ Пришли ссылку на YouTube видео")
         return
 
-    status = await message.answer("Извлекаю расшифровку...")
+    status = await message.answer("⏳ Извлекаю расшифровку...")
 
     try:
-        # Получаем transcript
-        video_id = url.split("v=")[-1].split("&")[0] if "v=" in url else url.split("/")[-1].split("?")[0]
+        # Получаем ID видео
+        if "v=" in url:
+            video_id = url.split("v=")[-1].split("&")[0]
+        else:
+            video_id = url.split("/")[-1].split("?")[0]
+
+        # Получаем расшифровку
         transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['ru', 'en', 'uk'])
         transcript_text = " ".join([item['text'] for item in transcript_list])
 
-        await bot.edit_message_text("Делаю саммари через ГигаЧат...", status.chat.id, status.message_id)
+        await bot.edit_message_text("🤖 Делаю саммари через ГигаЧат...", status.chat.id, status.message_id)
 
-        # ГигаЧат
+        # Запрос к ГигаЧат
         with GigaChat(
             credentials=GIGACHAT_CREDENTIALS,
             scope="GIGACHAT_API_PERS",
-            model="GigaChat",           # или GigaChat-2-Pro
+            model="GigaChat",        # Можно поменять на GigaChat-2-Pro
             verify_ssl_certs=False
         ) as client:
             response = client.chat.create(
                 messages=[
-                    {"role": "system", "content": "Ты — профессиональный аналитик подкастов."},
-                    {"role": "user", "content": SUMMARY_PROMPT.format(transcript=transcript_text[:25000])}
+                    {"role": "system", "content": "Ты — профессиональный аналитик подкастов. Делай саммари строго по шаблону."},
+                    {"role": "user", "content": SUMMARY_PROMPT.format(transcript=transcript_text[:28000])}
                 ],
-                temperature=0.6,
+                temperature=0.65,
                 max_tokens=4000
             )
             summary = response.choices[0].message.content
 
-        await bot.edit_message_text("Создаю Word-файл...", status.chat.id, status.message_id)
+        await bot.edit_message_text("📄 Создаю Word-файл...", status.chat.id, status.message_id)
 
-        # Создание .docx
+        # Создание Word документа
         doc = Document()
-        doc.add_heading('Саммари подкаста', 0)
+        doc.add_heading('Саммари подкаста', level=0)
         
         for line in summary.split('\n'):
             line = line.strip()
             if line.startswith('**') and line.endswith('**'):
-                doc.add_heading(line.replace('**', ''), level=1)
-            elif line.startswith('- '):
+                doc.add_heading(line.replace('**', '').strip(), level=1)
+            elif line.startswith('-'):
                 doc.add_paragraph(line, style='List Bullet')
             else:
-                doc.add_paragraph(line)
+                if line:
+                    doc.add_paragraph(line)
 
         filename = f"summary_{video_id}.docx"
         doc.save(filename)
 
         await message.answer_document(
-            types.FSInputFile(filename),
-            caption="Готово ✅"
+            document=types.FSInputFile(filename),
+            caption="✅ Саммари готово!"
         )
 
-        os.remove(filename)
+        if os.path.exists(filename):
+            os.remove(filename)
 
     except Exception as e:
-        await bot.edit_message_text(f"Ошибка: {str(e)}", status.chat.id, status.message_id)
+        error_text = str(e)
+        if "transcript" in error_text.lower():
+            error_text = "У этого видео нет доступной расшифровки."
+        await bot.edit_message_text(f"❌ Ошибка: {error_text}", status.chat.id, status.message_id)
 
 async def main():
     await dp.start_polling(bot)
