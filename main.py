@@ -1,7 +1,8 @@
-import asyncio
 import os
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from telegram import Update
+from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from youtube_transcript_api import YouTubeTranscriptApi
 from gigachat import GigaChat
 from docx import Document
@@ -9,9 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-bot = Bot(token=os.getenv("TG_TOKEN"))
-dp = Dispatcher()
-
+TG_TOKEN = os.getenv("TG_TOKEN")
 GIGACHAT_CREDENTIALS = os.getenv("GIGACHAT_CREDENTIALS")
 
 SUMMARY_PROMPT = """
@@ -39,51 +38,59 @@ SUMMARY_PROMPT = """
 {transcript}
 """
 
-@dp.message()
-async def handle_link(message: types.Message):
-    url = message.text.strip()
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        pass
+
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
+
+
+async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text.strip()
     if "youtube.com" not in url and "youtu.be" not in url:
-        await message.answer("❌ Пришли ссылку на YouTube видео")
+        await update.message.reply_text("❌ Пришли ссылку на YouTube видео")
         return
 
-    status = await message.answer("⏳ Извлекаю расшифровку...")
+    status_msg = await update.message.reply_text("⏳ Извлекаю расшифровку...")
 
     try:
-        # Получаем ID видео
         if "v=" in url:
             video_id = url.split("v=")[-1].split("&")[0]
         else:
             video_id = url.split("/")[-1].split("?")[0]
 
-        # Получаем расшифровку
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['ru', 'en', 'uk'])
-        transcript_text = " ".join([item['text'] for item in transcript_list])
+        ytt_api = YouTubeTranscriptApi()
+        transcript_list_obj = ytt_api.list(video_id)
+        transcript_obj = transcript_list_obj.find_transcript(['ru', 'en', 'uk'])
+        fetched_transcript = transcript_obj.fetch()
+        transcript_text = " ".join([snippet.text for snippet in fetched_transcript])
 
-        await bot.edit_message_text("🤖 Делаю саммари через ГигаЧат...", status.chat.id, status.message_id)
+        await status_msg.edit_text("🤖 Делаю саммари через ГигаЧат...")
 
-        # Запрос к ГигаЧат
         with GigaChat(
             credentials=GIGACHAT_CREDENTIALS,
-            scope="GIGACHAT_API_PERS",
-            model="GigaChat",        # Можно поменять на GigaChat-2-Pro
             verify_ssl_certs=False
         ) as client:
-            response = client.chat.create(
-                messages=[
-                    {"role": "system", "content": "Ты — профессиональный аналитик подкастов. Делай саммари строго по шаблону."},
-                    {"role": "user", "content": SUMMARY_PROMPT.format(transcript=transcript_text[:28000])}
-                ],
-                temperature=0.65,
-                max_tokens=4000
+            response = client.chat(
+                SUMMARY_PROMPT.format(transcript=transcript_text[:28000])
             )
             summary = response.choices[0].message.content
 
-        await bot.edit_message_text("📄 Создаю Word-файл...", status.chat.id, status.message_id)
+        await status_msg.edit_text("📄 Создаю Word-файл...")
 
-        # Создание Word документа
         doc = Document()
         doc.add_heading('Саммари подкаста', level=0)
-        
+
         for line in summary.split('\n'):
             line = line.strip()
             if line.startswith('**') and line.endswith('**'):
@@ -97,8 +104,8 @@ async def handle_link(message: types.Message):
         filename = f"summary_{video_id}.docx"
         doc.save(filename)
 
-        await message.answer_document(
-            document=types.FSInputFile(filename),
+        await update.message.reply_document(
+            document=open(filename, 'rb'),
             caption="✅ Саммари готово!"
         )
 
@@ -107,12 +114,21 @@ async def handle_link(message: types.Message):
 
     except Exception as e:
         error_text = str(e)
-        if "transcript" in error_text.lower():
-            error_text = "У этого видео нет доступной расшифровки."
-        await bot.edit_message_text(f"❌ Ошибка: {error_text}", status.chat.id, status.message_id)
+        if "transcript" in error_text.lower() or "Transcript" in error_text:
+            error_text = "У этого видео нет доступной расшифровки на нужном языке."
+        await status_msg.edit_text(f"❌ Ошибка: {error_text}")
 
-async def main():
-    await dp.start_polling(bot)
+
+def main():
+    print("Бот запускается...")
+    threading.Thread(target=run_health_server, daemon=True).start()
+    app = Application.builder().token(TG_TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     asyncio.run(main())
