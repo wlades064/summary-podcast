@@ -1,9 +1,10 @@
 import os
 import threading
+import subprocess
+import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
-from youtube_transcript_api import YouTubeTranscriptApi
 from gigachat import GigaChat
 from docx import Document
 from dotenv import load_dotenv
@@ -55,6 +56,39 @@ def run_health_server():
     server.serve_forever()
 
 
+def get_transcript(video_id):
+    result = subprocess.run(
+        ["yt-dlp", "--write-auto-sub", "--sub-lang", "ru", "--skip-download",
+         "--sub-format", "json3", "-o", f"/tmp/{video_id}", f"https://www.youtube.com/watch?v={video_id}"],
+        capture_output=True, text=True
+    )
+    
+    import glob
+    files = glob.glob(f"/tmp/{video_id}*.json3")
+    if not files:
+        files = glob.glob(f"/tmp/{video_id}*.vtt")
+        if not files:
+            raise Exception("Субтитры не найдены")
+        with open(files[0], "r", encoding="utf-8") as f:
+            content = f.read()
+        import re
+        text = re.sub(r'<[^>]+>', '', content)
+        text = re.sub(r'\d{2}:\d{2}:\d{2}\.\d{3}.*', '', text)
+        lines = [l.strip() for l in text.split('\n') if l.strip() and not l.startswith('WEBVTT')]
+        return ' '.join(dict.fromkeys(lines))
+    
+    with open(files[0], "r", encoding="utf-8") as f:
+        data = json.load(f)
+    
+    texts = []
+    for event in data.get("events", []):
+        for seg in event.get("segs", []):
+            t = seg.get("utf8", "").strip()
+            if t and t != "\n":
+                texts.append(t)
+    return " ".join(texts)
+
+
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
     if "youtube.com" not in url and "youtu.be" not in url:
@@ -69,11 +103,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             video_id = url.split("/")[-1].split("?")[0]
 
-        ytt_api = YouTubeTranscriptApi()
-        transcript_list_obj = ytt_api.list(video_id)
-        transcript_obj = transcript_list_obj.find_transcript(['ru', 'en', 'uk'])
-        fetched_transcript = transcript_obj.fetch()
-        transcript_text = " ".join([snippet.text for snippet in fetched_transcript])
+        transcript_text = get_transcript(video_id)
 
         await status_msg.edit_text("🤖 Делаю саммари через ГигаЧат...")
 
@@ -101,7 +131,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if line:
                     doc.add_paragraph(line)
 
-        filename = f"summary_{video_id}.docx"
+        filename = f"/tmp/summary_{video_id}.docx"
         doc.save(filename)
 
         await update.message.reply_document(
@@ -113,10 +143,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(filename)
 
     except Exception as e:
-        error_text = str(e)
-        if "transcript" in error_text.lower() or "Transcript" in error_text:
-            error_text = "У этого видео нет доступной расшифровки на нужном языке."
-        await status_msg.edit_text(f"❌ Ошибка: {error_text}")
+        await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
 
 
 def main():
@@ -129,6 +156,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-if __name__ == "__main__":
-    asyncio.run(main())
