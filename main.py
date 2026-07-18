@@ -74,6 +74,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             proxy_config=WebshareProxyConfig(
                 proxy_username="yydghplu",
                 proxy_password="4bz40i08vqg3",
+                retries_when_blocked=10,
             )
         )
         transcript_list_obj = ytt_api.list(video_id)
