@@ -1,5 +1,5 @@
 python-telegram-bot==22.8
-yt-dlp
+youtube-transcript-api
 gigachat
 python-docx
 python-dotenv
