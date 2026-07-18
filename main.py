@@ -1,6 +1,5 @@
 import os
 import re
-import json
 import glob
 import threading
 import subprocess
@@ -64,9 +63,10 @@ def get_transcript(video_id):
 
     cmd = [
         "yt-dlp",
+        "--cookies", "cookies.txt",
         "--write-auto-sub",
         "--write-sub",
-        "--sub-lang", "ru,ru-orig",
+        "--sub-lang", "ru,ru-orig,en,en-orig",
         "--skip-download",
         "--sub-format", "vtt",
         "--extractor-args", "youtube:player_client=android,ios",
@@ -77,7 +77,7 @@ def get_transcript(video_id):
 
     files = glob.glob(f"/tmp/{video_id}*.vtt")
     if not files:
-        raise Exception(f"Субтитры не найдены. yt-dlp: {result.stderr[-300:]}")
+        raise Exception(f"Субтитры не найдены. yt-dlp: {result.stderr[-500:]}")
 
     with open(files[0], "r", encoding="utf-8") as f:
         content = f.read()
