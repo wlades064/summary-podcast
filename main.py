@@ -69,7 +69,6 @@ def get_transcript(video_id):
         "--sub-lang", "ru,ru-orig,en,en-orig",
         "--skip-download",
         "--sub-format", "vtt",
-        "--extractor-args", "youtube:player_client=android,ios",
         "-o", f"/tmp/{video_id}.%(ext)s",
         f"https://www.youtube.com/watch?v={video_id}"
     ]
