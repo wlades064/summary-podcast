@@ -69,12 +69,27 @@ class SummaryPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "summary.docx"
             main.create_document(
-                "# Главные мысли\n- Первый тезис",
-                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "# 📌 О чем выпуск\n## 1. Модель\n- **Вывод:** Первый тезис",
                 target,
             )
             self.assertTrue(target.is_file())
             self.assertGreater(target.stat().st_size, 0)
+            from docx import Document
+
+            created = Document(target)
+            full_text = "\n".join(paragraph.text for paragraph in created.paragraphs)
+            self.assertNotIn("**", full_text)
+            self.assertEqual(created.paragraphs[0].style.name, "Heading 1")
+            self.assertEqual(created.paragraphs[1].style.name, "Heading 2")
+            self.assertTrue(created.paragraphs[2].runs[0].bold)
+            self.assertAlmostEqual(created.sections[0].page_width.cm, 21, places=1)
+            self.assertAlmostEqual(created.sections[0].left_margin.cm, 3, places=1)
+
+    def test_prompt_matches_reference_structure(self):
+        self.assertIn("# 📌 О чем этот выпуск", main.SUMMARY_PROMPT)
+        self.assertIn("# 🧠 Ключевые модели и техники", main.SUMMARY_PROMPT)
+        self.assertIn("Не включай рекламные интеграции", main.SUMMARY_PROMPT)
+        self.assertIn("Не создавай отдельные разделы с таймкодами", main.SUMMARY_PROMPT)
 
 
 if __name__ == "__main__":

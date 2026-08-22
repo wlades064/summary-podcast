@@ -1,6 +1,7 @@
 .env
 .venv/
 .uv-cache/
+.docx-analysis/
 __pycache__/
 *.py[cod]
 cookies.txt

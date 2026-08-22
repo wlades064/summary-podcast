@@ -7,12 +7,12 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import imageio_ffmpeg
 from docx import Document
+from docx.shared import Cm, Pt, RGBColor
 from dotenv import load_dotenv
 from google import genai
 from telegram import Update
@@ -36,33 +36,9 @@ LOGGER = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-SUMMARY_PROMPT = """
-Проанализируй это русскоязычное видео или аудио целиком и подготовь саммари
-на русском языке. Не выдумывай факты, рекомендации или названия, которых нет
-в материале. Если разделу нечего добавить, напиши «Не упоминалось».
-
-Используй строго эту структуру Markdown:
-
-# Краткое изложение
-5–8 содержательных предложений.
-
-# Главные мысли
-- конкретные тезисы
-
-# Полезные советы, которые могут улучшить жизнь
-- практические советы из материала
-
-# Техники и упражнения
-- описанные техники и упражнения
-
-# Рекомендации
-- упомянутые книги, фильмы, авторы и ресурсы
-
-# Ключевые фрагменты
-- 5–10 ключевых моментов с примерными временными метками вида [ММ:СС]
-
-Сохраняй важные оговорки автора и не своди сложные тезисы к лозунгам.
-""".strip()
+SUMMARY_PROMPT = (Path(__file__).parent / "prompts" / "summary_ru.md").read_text(
+    encoding="utf-8"
+)
 
 
 def normalize_youtube_url(raw_url: str) -> tuple[str, str]:
@@ -199,26 +175,64 @@ def generate_summary(url: str, destination: Path) -> tuple[str, bool]:
         return summarize_audio_fallback(client, url, destination), True
 
 
+def add_inline_markdown(paragraph, text: str):
+    """Render the small bold subset requested from Gemini without raw ** marks."""
+    for part in re.split(r"(\*\*.+?\*\*)", text):
+        if not part:
+            continue
+        if part.startswith("**") and part.endswith("**"):
+            paragraph.add_run(part[2:-2]).bold = True
+        else:
+            paragraph.add_run(part)
+
+
 def add_markdown_to_document(document: Document, markdown: str):
     for raw_line in markdown.splitlines():
         line = raw_line.strip()
         if not line:
             continue
-        if line.startswith("#"):
-            document.add_heading(line.lstrip("#").strip(" *"), level=1)
-        elif line.startswith("**") and line.endswith("**"):
-            document.add_heading(line.strip("* "), level=1)
-        elif re.match(r"^[-*•]\s+", line):
-            document.add_paragraph(re.sub(r"^[-*•]\s+", "", line), style="List Bullet")
-        else:
-            document.add_paragraph(line)
+        heading = re.match(r"^(#{1,3})\s+(.+)$", line)
+        if heading:
+            document.add_heading(heading.group(2).strip(" *"), level=len(heading.group(1)))
+            continue
+
+        bullet = re.match(r"^[-*•]\s+(.+)$", line)
+        paragraph = document.add_paragraph(style="List Bullet" if bullet else None)
+        add_inline_markdown(paragraph, bullet.group(1) if bullet else line)
 
 
-def create_document(summary: str, source_url: str, filename: Path):
+def configure_document(document: Document):
+    """Use the compact A4 layout and restrained hierarchy of the reference."""
+    section = document.sections[0]
+    section.page_width = Cm(21)
+    section.page_height = Cm(29.7)
+    section.top_margin = Cm(2)
+    section.bottom_margin = Cm(2)
+    section.left_margin = Cm(3)
+    section.right_margin = Cm(1.5)
+
+    normal = document.styles["Normal"]
+    normal.font.name = "Aptos"
+    normal.font.size = Pt(11)
+    normal.paragraph_format.space_after = Pt(6)
+
+    for style_name, size, before, after in (
+        ("Heading 1", 12, 12, 6),
+        ("Heading 2", 11, 8, 3),
+        ("Heading 3", 11, 6, 3),
+    ):
+        style = document.styles[style_name]
+        style.font.name = "Aptos"
+        style.font.size = Pt(size)
+        style.font.bold = True
+        style.font.color.rgb = RGBColor(0, 0, 0)
+        style.paragraph_format.space_before = Pt(before)
+        style.paragraph_format.space_after = Pt(after)
+
+
+def create_document(summary: str, filename: Path):
     document = Document()
-    document.add_heading("Саммари подкаста", level=0)
-    document.add_paragraph(f"Источник: {source_url}")
-    document.add_paragraph(f"Создано: {datetime.now().astimezone():%d.%m.%Y %H:%M}")
+    configure_document(document)
     add_markdown_to_document(document, summary)
     document.save(filename)
 
@@ -248,7 +262,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await status.edit_text("📄 Видео проанализировано, создаю Word-файл…")
 
                 filename = temp_path / f"summary_{video_id}.docx"
-                await asyncio.to_thread(create_document, summary, url, filename)
+                await asyncio.to_thread(create_document, summary, filename)
                 with filename.open("rb") as document:
                     await update.message.reply_document(
                         document=document,
