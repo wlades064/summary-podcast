@@ -1,5 +1,6 @@
 python-telegram-bot==22.8
-yt-dlp
-gigachat
-python-docx
-python-dotenv
+google-genai>=1.67,<2
+yt-dlp>=2025.8.20
+imageio-ffmpeg>=0.6,<1
+python-docx>=1.2,<2
+python-dotenv>=1.1,<2
