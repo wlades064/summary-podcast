@@ -28,6 +28,16 @@ class NormalizeYoutubeUrlTests(unittest.TestCase):
 
 
 class SummaryPipelineTests(unittest.TestCase):
+    @patch("main.subprocess.run")
+    @patch("main.imageio_ffmpeg.get_ffmpeg_exe", return_value="C:/ffmpeg/ffmpeg.exe")
+    def test_downloader_uses_current_python(self, _ffmpeg, run):
+        run.return_value.returncode = 1
+        run.return_value.stderr = "download failed"
+        with tempfile.TemporaryDirectory() as directory, self.assertRaises(RuntimeError):
+            main.download_audio("https://youtu.be/dQw4w9WgXcQ", Path(directory))
+        command = run.call_args.args[0]
+        self.assertEqual(command[:3], [main.sys.executable, "-m", "yt_dlp"])
+
     def test_direct_youtube_is_preferred(self):
         client = Mock()
         with patch.object(main, "create_gemini_client", return_value=client), patch.object(

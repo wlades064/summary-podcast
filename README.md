@@ -23,6 +23,8 @@ Gemini на русском языке и возвращает саммари в 
    - `TG_TOKEN` — токен от BotFather;
    - `GEMINI_API_KEY` — ключ из Google AI Studio;
    - `GEMINI_MODEL` — необязательно, по умолчанию `gemini-3.7-flash`.
+   - `TELEGRAM_PROXY_URL` — необязательный HTTP/SOCKS5-прокси, если Telegram
+     недоступен из вашей сети.
 
 4. Запустите: `python main.py`.
 

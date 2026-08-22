@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from datetime import datetime
@@ -23,6 +24,7 @@ load_dotenv()
 TG_TOKEN = os.getenv("TG_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
+TELEGRAM_PROXY_URL = os.getenv("TELEGRAM_PROXY_URL")
 PROCESSING_LOCK = asyncio.Lock()
 
 logging.basicConfig(
@@ -143,7 +145,9 @@ def download_audio(url: str, destination: Path) -> Path:
     output_template = str(destination / "audio.%(ext)s")
     ffmpeg_dir = str(Path(imageio_ffmpeg.get_ffmpeg_exe()).parent)
     command = [
-        "yt-dlp",
+        sys.executable,
+        "-m",
+        "yt_dlp",
         "--no-playlist",
         "--retries",
         "3",
@@ -286,9 +290,19 @@ def main():
     validate_configuration()
     LOGGER.info("Starting bot with model %s", GEMINI_MODEL)
     Thread(target=run_health_server, daemon=True).start()
-    application = Application.builder().token(TG_TOKEN).build()
+    builder = (
+        Application.builder()
+        .token(TG_TOKEN)
+        .connect_timeout(30)
+        .get_updates_connect_timeout(30)
+    )
+    if TELEGRAM_PROXY_URL:
+        builder = builder.proxy(TELEGRAM_PROXY_URL).get_updates_proxy(
+            TELEGRAM_PROXY_URL
+        )
+    application = builder.build()
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    application.run_polling()
+    application.run_polling(bootstrap_retries=3)
 
 
 if __name__ == "__main__":
