@@ -32,6 +32,10 @@ logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
 )
 LOGGER = logging.getLogger(__name__)
+# HTTPX includes the complete Telegram Bot API URL in INFO messages. That URL
+# contains the bot token, so third-party HTTP logs must never be emitted at INFO.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 SUMMARY_PROMPT = """
 Проанализируй это русскоязычное видео или аудио целиком и подготовь саммари
