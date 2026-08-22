@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -7,9 +8,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from threading import Thread
 from urllib.parse import parse_qs, urlparse
 
 import imageio_ffmpeg
@@ -64,21 +63,6 @@ SUMMARY_PROMPT = """
 
 Сохраняй важные оговорки автора и не своди сложные тезисы к лозунгам.
 """.strip()
-
-
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-    def log_message(self, format, *args):
-        pass
-
-
-def run_health_server():
-    port = int(os.environ.get("PORT", 8080))
-    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
 
 
 def normalize_youtube_url(raw_url: str) -> tuple[str, str]:
@@ -290,10 +274,15 @@ def validate_configuration():
         raise RuntimeError(f"Не заданы обязательные переменные: {', '.join(missing)}")
 
 
+def webhook_security_values(token: str) -> tuple[str, str]:
+    """Derive a non-secret URL path and Telegram header secret from the token."""
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return f"telegram/{digest[:24]}", digest[24:]
+
+
 def main():
     validate_configuration()
     LOGGER.info("Starting bot with model %s", GEMINI_MODEL)
-    Thread(target=run_health_server, daemon=True).start()
     builder = (
         Application.builder()
         .token(TG_TOKEN)
@@ -306,7 +295,21 @@ def main():
         )
     application = builder.build()
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    application.run_polling(bootstrap_retries=3)
+    external_url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("WEBHOOK_URL")
+    if external_url:
+        webhook_path, webhook_secret = webhook_security_values(TG_TOKEN)
+        LOGGER.info("Starting Telegram webhook")
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=int(os.getenv("PORT", 10000)),
+            url_path=webhook_path,
+            webhook_url=f"{external_url.rstrip('/')}/{webhook_path}",
+            secret_token=webhook_secret,
+            bootstrap_retries=3,
+        )
+    else:
+        LOGGER.info("Starting Telegram polling")
+        application.run_polling(bootstrap_retries=3)
 
 
 if __name__ == "__main__":

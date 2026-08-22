@@ -26,6 +26,14 @@ class NormalizeYoutubeUrlTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 main.normalize_youtube_url(url)
 
+    def test_webhook_values_are_stable_and_do_not_expose_token(self):
+        token = "123456:secret-token"
+        path, secret = main.webhook_security_values(token)
+        self.assertEqual((path, secret), main.webhook_security_values(token))
+        self.assertNotIn(token, path)
+        self.assertNotIn(token, secret)
+        self.assertTrue(path.startswith("telegram/"))
+
 
 class SummaryPipelineTests(unittest.TestCase):
     @patch("main.subprocess.run")
