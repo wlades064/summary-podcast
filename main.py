@@ -23,6 +23,8 @@ load_dotenv()
 TG_TOKEN = os.getenv("TG_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
+GEMINI_JOB_TIMEOUT = int(os.getenv("GEMINI_JOB_TIMEOUT", "600"))
+GEMINI_POLL_INTERVAL = int(os.getenv("GEMINI_POLL_INTERVAL", "5"))
 TELEGRAM_PROXY_URL = os.getenv("TELEGRAM_PROXY_URL")
 PROCESSING_LOCK = asyncio.Lock()
 
@@ -76,25 +78,82 @@ def create_gemini_client():
 
 
 def request_summary(client, media_input: dict) -> str:
-    """Call Gemini with small retries for transient free-tier failures."""
-    last_error = None
-    for attempt, delay in enumerate((0, 15, 45), start=1):
-        if delay:
-            time.sleep(delay)
-        try:
-            response = client.interactions.create(
-                model=GEMINI_MODEL,
-                input=[media_input, {"type": "text", "text": SUMMARY_PROMPT}],
-                timeout=900,
-            )
-            summary = (response.output_text or "").strip()
-            if not summary:
-                raise RuntimeError("Gemini вернул пустой ответ")
-            return summary
-        except Exception as error:
-            last_error = error
-            LOGGER.warning("Gemini attempt %s failed: %s", attempt, error)
-    raise RuntimeError(f"Gemini не смог обработать материал: {last_error}")
+    """Run a long Gemini analysis in the background and poll its state."""
+    interaction = None
+    started_at = time.monotonic()
+    deadline = started_at + GEMINI_JOB_TIMEOUT
+    try:
+        LOGGER.info("Creating background Gemini interaction")
+        interaction = client.interactions.create(
+            model=GEMINI_MODEL,
+            input=[media_input, {"type": "text", "text": SUMMARY_PROMPT}],
+            background=True,
+            timeout=60,
+        )
+        interaction_id = interaction.id
+        if not interaction_id:
+            raise RuntimeError("Gemini не вернул ID фоновой задачи")
+
+        last_status = None
+        consecutive_poll_errors = 0
+        while True:
+            raw_status = getattr(interaction, "status", "")
+            status_value = getattr(raw_status, "value", raw_status)
+            status_name = str(status_value or "unknown").lower().split(".")[-1]
+            if status_name != last_status:
+                LOGGER.info(
+                    "Gemini interaction %s status: %s", interaction_id, status_name
+                )
+                last_status = status_name
+
+            if status_name == "completed":
+                summary = (getattr(interaction, "output_text", "") or "").strip()
+                if not summary:
+                    raise RuntimeError("Gemini завершил задачу, но вернул пустой ответ")
+                LOGGER.info(
+                    "Gemini interaction %s completed in %s seconds",
+                    interaction_id,
+                    round(time.monotonic() - started_at),
+                )
+                return summary
+
+            if status_name in {"failed", "cancelled", "canceled", "expired"}:
+                details = getattr(interaction, "error", None) or status_name
+                raise RuntimeError(f"задача Gemini завершилась со статусом {details}")
+
+            if time.monotonic() >= deadline:
+                try:
+                    client.interactions.cancel(interaction_id, timeout=30)
+                except Exception as cancel_error:
+                    LOGGER.warning(
+                        "Could not cancel Gemini interaction %s: %s",
+                        interaction_id,
+                        cancel_error,
+                    )
+                raise TimeoutError(
+                    f"Gemini не завершил анализ за {GEMINI_JOB_TIMEOUT // 60} минут"
+                )
+
+            time.sleep(GEMINI_POLL_INTERVAL)
+            try:
+                interaction = client.interactions.get(interaction_id, timeout=30)
+                consecutive_poll_errors = 0
+            except Exception as poll_error:
+                consecutive_poll_errors += 1
+                LOGGER.warning(
+                    "Gemini interaction %s poll failed (%s/5): %s",
+                    interaction_id,
+                    consecutive_poll_errors,
+                    poll_error,
+                )
+                if consecutive_poll_errors >= 5:
+                    raise RuntimeError(
+                        "Не удалось получить состояние задачи Gemini после 5 попыток"
+                    ) from poll_error
+    except Exception:
+        if interaction is None:
+            LOGGER.exception("Could not create background Gemini interaction")
+        raise
 
 
 def summarize_youtube_url(client, url: str) -> str:
@@ -169,10 +228,17 @@ def generate_summary(url: str, destination: Path) -> tuple[str, bool]:
     """Prefer direct YouTube analysis; fall back to downloaded audio."""
     client = create_gemini_client()
     try:
-        return summarize_youtube_url(client, url), False
-    except Exception as direct_error:
-        LOGGER.warning("Direct YouTube analysis failed, using audio: %s", direct_error)
-        return summarize_audio_fallback(client, url, destination), True
+        try:
+            LOGGER.info("Starting direct YouTube analysis for %s", url)
+            return summarize_youtube_url(client, url), False
+        except Exception as direct_error:
+            LOGGER.warning("Direct YouTube analysis failed, using audio: %s", direct_error)
+            return summarize_audio_fallback(client, url, destination), True
+    finally:
+        try:
+            client.close()
+        except Exception as close_error:
+            LOGGER.warning("Could not close Gemini client: %s", close_error)
 
 
 def add_inline_markdown(paragraph, text: str):
@@ -253,9 +319,29 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             with tempfile.TemporaryDirectory(prefix=f"summary-{video_id}-") as temp_dir:
                 temp_path = Path(temp_dir)
-                summary, used_audio = await asyncio.to_thread(
-                    generate_summary, url, temp_path
+                LOGGER.info("Accepted video %s for processing", video_id)
+                started_at = time.monotonic()
+                processing_task = asyncio.create_task(
+                    asyncio.to_thread(generate_summary, url, temp_path)
                 )
+                while True:
+                    done, _ = await asyncio.wait({processing_task}, timeout=60)
+                    if processing_task in done:
+                        summary, used_audio = await processing_task
+                        break
+                    elapsed_minutes = max(1, int((time.monotonic() - started_at) // 60))
+                    LOGGER.info(
+                        "Video %s is still processing (%s min)",
+                        video_id,
+                        elapsed_minutes,
+                    )
+                    try:
+                        await status.edit_text(
+                            "🤖 Gemini анализирует видео…\n"
+                            f"⏱ Прошло: {elapsed_minutes} мин."
+                        )
+                    except Exception as status_error:
+                        LOGGER.warning("Could not update Telegram status: %s", status_error)
                 if used_audio:
                     await status.edit_text("📄 Аудио распознано, создаю Word-файл…")
                 else:

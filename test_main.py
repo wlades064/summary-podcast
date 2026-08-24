@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import main
@@ -36,6 +37,34 @@ class NormalizeYoutubeUrlTests(unittest.TestCase):
 
 
 class SummaryPipelineTests(unittest.TestCase):
+    @patch("main.time.sleep")
+    def test_summary_uses_background_interaction(self, _sleep):
+        client = Mock()
+        client.interactions.create.return_value = SimpleNamespace(
+            id="interaction-1", status="in_progress", output_text=""
+        )
+        client.interactions.get.return_value = SimpleNamespace(
+            id="interaction-1", status="completed", output_text="готовое саммари"
+        )
+
+        result = main.request_summary(client, {"type": "video", "uri": "https://x"})
+
+        self.assertEqual(result, "готовое саммари")
+        self.assertTrue(client.interactions.create.call_args.kwargs["background"])
+        client.interactions.get.assert_called_once_with("interaction-1", timeout=30)
+
+    def test_summary_reports_failed_background_interaction(self):
+        client = Mock()
+        client.interactions.create.return_value = SimpleNamespace(
+            id="interaction-1",
+            status="failed",
+            output_text="",
+            error="RESOURCE_EXHAUSTED",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "RESOURCE_EXHAUSTED"):
+            main.request_summary(client, {"type": "video", "uri": "https://x"})
+
     @patch("main.subprocess.run")
     @patch("main.imageio_ffmpeg.get_ffmpeg_exe", return_value="C:/ffmpeg/ffmpeg.exe")
     def test_downloader_uses_current_python(self, _ffmpeg, run):
