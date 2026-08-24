@@ -228,26 +228,44 @@ def summarize_youtube_url(client, url: str) -> str:
 
 def summarize_transcript(client, transcript: str) -> str:
     """Summarize transcript text with a regular, bounded Gemini request."""
-    LOGGER.info("Sending Supadata transcript to Gemini")
-    response = client.interactions.create(
-        model=GEMINI_MODEL,
-        input=[
-            {
-                "type": "text",
-                "text": (
-                    "Ниже приведена расшифровка русскоязычного YouTube-видео. "
-                    "Используй её как единственный источник содержания.\n\n"
-                    f"{transcript}"
-                ),
-            },
-            {"type": "text", "text": SUMMARY_PROMPT},
-        ],
-        timeout=300,
-    )
-    summary = (response.output_text or "").strip()
-    if not summary:
-        raise RuntimeError("Gemini вернул пустой ответ на расшифровку")
-    return summary
+    request_input = [
+        {
+            "type": "text",
+            "text": (
+                "Ниже приведена расшифровка русскоязычного YouTube-видео. "
+                "Используй её как единственный источник содержания.\n\n"
+                f"{transcript}"
+            ),
+        },
+        {"type": "text", "text": SUMMARY_PROMPT},
+    ]
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            LOGGER.info("Sending Supadata transcript to Gemini (attempt %s/3)", attempt)
+            response = client.interactions.create(
+                model=GEMINI_MODEL,
+                input=request_input,
+                timeout=300,
+            )
+            summary = (response.output_text or "").strip()
+            if not summary:
+                raise RuntimeError("Gemini вернул пустой ответ на расшифровку")
+            return summary
+        except Exception as error:
+            last_error = error
+            error_text = str(error)
+            if "429" not in error_text.lower() or attempt == 3:
+                raise
+            retry_match = re.search(r"retry in\s+([0-9.]+)s", error_text, re.IGNORECASE)
+            retry_seconds = float(retry_match.group(1)) if retry_match else 60.0
+            wait_seconds = min(max(retry_seconds + 3, 10), 120)
+            LOGGER.warning(
+                "Gemini quota is temporarily exhausted; retrying in %s seconds",
+                round(wait_seconds),
+            )
+            time.sleep(wait_seconds)
+    raise RuntimeError(f"Gemini не обработал расшифровку: {last_error}")
 
 
 def download_audio(url: str, destination: Path) -> Path:
@@ -325,12 +343,19 @@ def generate_summary(url: str, destination: Path) -> tuple[str, bool]:
         if SUPADATA_API_KEY:
             try:
                 transcript = fetch_supadata_transcript(url)
-                return summarize_transcript(client, transcript), False
             except Exception as transcript_error:
                 LOGGER.warning(
                     "Supadata transcript path failed, using direct video: %s",
                     transcript_error,
                 )
+            else:
+                try:
+                    return summarize_transcript(client, transcript), False
+                except Exception as summary_error:
+                    raise RuntimeError(
+                        "Расшифровка получена, но временный лимит или ошибка Gemini "
+                        f"не позволили создать саммари: {summary_error}"
+                    ) from summary_error
         else:
             LOGGER.warning("SUPADATA_API_KEY is not configured; skipping transcript")
         try:

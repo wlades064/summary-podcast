@@ -74,6 +74,34 @@ class SummaryPipelineTests(unittest.TestCase):
         direct.assert_not_called()
 
     @patch("main.time.sleep")
+    def test_transcript_summary_retries_temporary_gemini_quota(self, sleep):
+        client = Mock()
+        client.interactions.create.side_effect = [
+            RuntimeError("429: Please retry in 24.1s"),
+            SimpleNamespace(output_text="готовое саммари"),
+        ]
+
+        result = main.summarize_transcript(client, "расшифровка")
+
+        self.assertEqual(result, "готовое саммари")
+        self.assertEqual(client.interactions.create.call_count, 2)
+        sleep.assert_called_once_with(27.1)
+
+    def test_gemini_text_failure_does_not_refetch_video(self):
+        client = Mock()
+        with patch.object(main, "SUPADATA_API_KEY", "supadata-key"), patch.object(
+            main, "create_gemini_client", return_value=client
+        ), patch.object(
+            main, "fetch_supadata_transcript", return_value="расшифровка"
+        ), patch.object(
+            main, "summarize_transcript", side_effect=RuntimeError("429 quota")
+        ), patch.object(main, "summarize_youtube_url") as direct:
+            with self.assertRaisesRegex(RuntimeError, "Расшифровка получена"):
+                main.generate_summary("https://youtu.be/dQw4w9WgXcQ", Path("."))
+
+        direct.assert_not_called()
+
+    @patch("main.time.sleep")
     def test_summary_uses_background_interaction(self, _sleep):
         client = Mock()
         client.interactions.create.return_value = SimpleNamespace(
