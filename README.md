@@ -31,6 +31,8 @@ Gemini на русском языке и возвращает саммари в 
    - `GEMINI_API_KEY` — ключ из Google AI Studio;
    - `SUPADATA_API_KEY` — ключ бесплатного аккаунта Supadata;
    - `GEMINI_MODEL` — необязательно, по умолчанию `gemini-3.7-flash`.
+   - `GEMINI_TEXT_MODEL` — модель для саммари готовых расшифровок, по умолчанию
+     бесплатная высокопроизводительная `gemini-3.5-flash-lite` с отдельной квотой.
    - `GEMINI_JOB_TIMEOUT` — максимальное ожидание одной задачи Gemini в
      секундах, по умолчанию `600`.
    - `GEMINI_POLL_INTERVAL` — интервал проверки задачи Gemini в секундах, по

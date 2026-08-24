@@ -85,6 +85,10 @@ class SummaryPipelineTests(unittest.TestCase):
 
         self.assertEqual(result, "готовое саммари")
         self.assertEqual(client.interactions.create.call_count, 2)
+        self.assertEqual(
+            client.interactions.create.call_args.kwargs["model"],
+            main.GEMINI_TEXT_MODEL,
+        )
         sleep.assert_called_once_with(27.1)
 
     def test_gemini_text_failure_does_not_refetch_video(self):

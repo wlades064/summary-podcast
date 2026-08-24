@@ -27,6 +27,7 @@ load_dotenv()
 TG_TOKEN = os.getenv("TG_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
+GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.5-flash-lite")
 GEMINI_JOB_TIMEOUT = int(os.getenv("GEMINI_JOB_TIMEOUT", "600"))
 GEMINI_POLL_INTERVAL = int(os.getenv("GEMINI_POLL_INTERVAL", "5"))
 SUPADATA_API_KEY = os.getenv("SUPADATA_API_KEY")
@@ -244,7 +245,7 @@ def summarize_transcript(client, transcript: str) -> str:
         try:
             LOGGER.info("Sending Supadata transcript to Gemini (attempt %s/3)", attempt)
             response = client.interactions.create(
-                model=GEMINI_MODEL,
+                model=GEMINI_TEXT_MODEL,
                 input=request_input,
                 timeout=300,
             )
