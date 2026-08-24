@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import imageio_ffmpeg
+import deno
 from docx import Document
 from docx.shared import Cm, Pt, RGBColor
 from dotenv import load_dotenv
@@ -25,6 +26,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
 GEMINI_JOB_TIMEOUT = int(os.getenv("GEMINI_JOB_TIMEOUT", "600"))
 GEMINI_POLL_INTERVAL = int(os.getenv("GEMINI_POLL_INTERVAL", "5"))
+YOUTUBE_COOKIES_FILE = os.getenv(
+    "YOUTUBE_COOKIES_FILE", "/etc/secrets/youtube_cookies.txt"
+)
 TELEGRAM_PROXY_URL = os.getenv("TELEGRAM_PROXY_URL")
 PROCESSING_LOCK = asyncio.Lock()
 
@@ -146,6 +150,12 @@ def request_summary(client, media_input: dict) -> str:
                     consecutive_poll_errors,
                     poll_error,
                 )
+                poll_error_text = str(poll_error).lower()
+                if "error code: 400" in poll_error_text or "error code: 403" in poll_error_text:
+                    raise RuntimeError(
+                        "Gemini не смог получить доступ к этому видео "
+                        f"({poll_error})"
+                    ) from poll_error
                 if consecutive_poll_errors >= 5:
                     raise RuntimeError(
                         "Не удалось получить состояние задачи Gemini после 5 попыток"
@@ -167,6 +177,7 @@ def download_audio(url: str, destination: Path) -> Path:
     """Download and convert one video's audio to an API-supported MP3 file."""
     output_template = str(destination / "audio.%(ext)s")
     ffmpeg_dir = str(Path(imageio_ffmpeg.get_ffmpeg_exe()).parent)
+    deno_path = deno.find_deno_bin()
     command = [
         sys.executable,
         "-m",
@@ -178,6 +189,8 @@ def download_audio(url: str, destination: Path) -> Path:
         "3",
         "--socket-timeout",
         "30",
+        "--js-runtimes",
+        f"deno:{deno_path}",
         "--extract-audio",
         "--audio-format",
         "mp3",
@@ -187,8 +200,12 @@ def download_audio(url: str, destination: Path) -> Path:
         ffmpeg_dir,
         "--output",
         output_template,
-        url,
     ]
+    cookies_path = Path(YOUTUBE_COOKIES_FILE)
+    if cookies_path.is_file():
+        LOGGER.info("Using YouTube cookies from configured secret file")
+        command.extend(["--cookies", str(cookies_path)])
+    command.append(url)
     result = subprocess.run(
         command,
         capture_output=True,
@@ -233,7 +250,14 @@ def generate_summary(url: str, destination: Path) -> tuple[str, bool]:
             return summarize_youtube_url(client, url), False
         except Exception as direct_error:
             LOGGER.warning("Direct YouTube analysis failed, using audio: %s", direct_error)
-            return summarize_audio_fallback(client, url, destination), True
+            try:
+                return summarize_audio_fallback(client, url, destination), True
+            except Exception as audio_error:
+                raise RuntimeError(
+                    "Gemini не получил доступ к видео, а резервное скачивание "
+                    f"аудио тоже не удалось. Gemini: {direct_error}. "
+                    f"YouTube: {audio_error}"
+                ) from audio_error
     finally:
         try:
             client.close()

@@ -1,6 +1,7 @@
 python-telegram-bot[socks,webhooks]==22.8
 google-genai>=2.0,<3
-yt-dlp>=2025.8.20
+yt-dlp[default]>=2025.8.20
+deno>=2.9,<3
 imageio-ffmpeg>=0.6,<1
 python-docx>=1.2,<2
 python-dotenv>=1.1,<2
