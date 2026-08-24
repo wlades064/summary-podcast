@@ -37,6 +37,42 @@ class NormalizeYoutubeUrlTests(unittest.TestCase):
 
 
 class SummaryPipelineTests(unittest.TestCase):
+    @patch("main.urlopen")
+    def test_supadata_uses_native_russian_transcript(self, urlopen):
+        response = Mock()
+        response.status = 200
+        response.read.return_value = json_bytes = (
+            b'{"content":"Russian transcript","lang":"ru"}'
+        )
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        urlopen.return_value = response
+
+        with patch.object(main, "SUPADATA_API_KEY", "supadata-key"):
+            transcript = main.fetch_supadata_transcript("https://youtu.be/example")
+
+        self.assertEqual(transcript, "Russian transcript")
+        request = urlopen.call_args.args[0]
+        self.assertIn("mode=native", request.full_url)
+        self.assertIn("lang=ru", request.full_url)
+        self.assertEqual(json_bytes, response.read.return_value)
+
+    def test_supadata_is_preferred_before_direct_video(self):
+        client = Mock()
+        with patch.object(main, "SUPADATA_API_KEY", "supadata-key"), patch.object(
+            main, "create_gemini_client", return_value=client
+        ), patch.object(
+            main, "fetch_supadata_transcript", return_value="расшифровка"
+        ) as fetch, patch.object(
+            main, "summarize_transcript", return_value="готово"
+        ) as summarize, patch.object(main, "summarize_youtube_url") as direct:
+            result = main.generate_summary("https://youtu.be/dQw4w9WgXcQ", Path("."))
+
+        self.assertEqual(result, ("готово", False))
+        fetch.assert_called_once()
+        summarize.assert_called_once_with(client, "расшифровка")
+        direct.assert_not_called()
+
     @patch("main.time.sleep")
     def test_summary_uses_background_interaction(self, _sleep):
         client = Mock()

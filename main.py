@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -8,7 +9,9 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.request import Request, urlopen
 
 import imageio_ffmpeg
 import deno
@@ -26,6 +29,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
 GEMINI_JOB_TIMEOUT = int(os.getenv("GEMINI_JOB_TIMEOUT", "600"))
 GEMINI_POLL_INTERVAL = int(os.getenv("GEMINI_POLL_INTERVAL", "5"))
+SUPADATA_API_KEY = os.getenv("SUPADATA_API_KEY")
 YOUTUBE_COOKIES_FILE = os.getenv(
     "YOUTUBE_COOKIES_FILE", "/etc/secrets/youtube_cookies.txt"
 )
@@ -79,6 +83,55 @@ def create_gemini_client():
     if not GEMINI_API_KEY:
         raise RuntimeError("На сервере не задан GEMINI_API_KEY")
     return genai.Client(api_key=GEMINI_API_KEY)
+
+
+def fetch_supadata_transcript(url: str) -> str:
+    """Fetch an existing Russian/available YouTube transcript without AI ASR."""
+    if not SUPADATA_API_KEY:
+        raise RuntimeError("На сервере не задан SUPADATA_API_KEY")
+
+    query = urlencode(
+        {
+            "url": url,
+            "lang": "ru",
+            "text": "true",
+            "mode": "native",
+        }
+    )
+    request = Request(
+        f"https://api.supadata.ai/v1/transcript?{query}",
+        headers={"x-api-key": SUPADATA_API_KEY, "Accept": "application/json"},
+    )
+    LOGGER.info("Requesting native transcript from Supadata")
+    try:
+        with urlopen(request, timeout=60) as response:
+            status_code = response.status
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        details = error.read().decode("utf-8", errors="replace")[-800:]
+        raise RuntimeError(f"Supadata вернул HTTP {error.code}: {details}") from error
+    except (URLError, TimeoutError) as error:
+        raise RuntimeError(f"Supadata временно недоступен: {error}") from error
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Supadata вернул некорректный ответ") from error
+
+    content = payload.get("content")
+    if isinstance(content, list):
+        content = " ".join(
+            str(item.get("text", "")) if isinstance(item, dict) else str(item)
+            for item in content
+        )
+    transcript = str(content or "").strip()
+    if status_code == 206 or not transcript:
+        details = payload.get("message") or payload.get("error") or "субтитры отсутствуют"
+        raise RuntimeError(f"Supadata не нашёл готовую расшифровку: {details}")
+
+    LOGGER.info(
+        "Supadata transcript received: language=%s, characters=%s",
+        payload.get("lang", "unknown"),
+        len(transcript),
+    )
+    return transcript
 
 
 def request_summary(client, media_input: dict) -> str:
@@ -173,6 +226,30 @@ def summarize_youtube_url(client, url: str) -> str:
     )
 
 
+def summarize_transcript(client, transcript: str) -> str:
+    """Summarize transcript text with a regular, bounded Gemini request."""
+    LOGGER.info("Sending Supadata transcript to Gemini")
+    response = client.interactions.create(
+        model=GEMINI_MODEL,
+        input=[
+            {
+                "type": "text",
+                "text": (
+                    "Ниже приведена расшифровка русскоязычного YouTube-видео. "
+                    "Используй её как единственный источник содержания.\n\n"
+                    f"{transcript}"
+                ),
+            },
+            {"type": "text", "text": SUMMARY_PROMPT},
+        ],
+        timeout=300,
+    )
+    summary = (response.output_text or "").strip()
+    if not summary:
+        raise RuntimeError("Gemini вернул пустой ответ на расшифровку")
+    return summary
+
+
 def download_audio(url: str, destination: Path) -> Path:
     """Download and convert one video's audio to an API-supported MP3 file."""
     output_template = str(destination / "audio.%(ext)s")
@@ -242,9 +319,20 @@ def summarize_audio_fallback(client, url: str, destination: Path) -> str:
 
 
 def generate_summary(url: str, destination: Path) -> tuple[str, bool]:
-    """Prefer direct YouTube analysis; fall back to downloaded audio."""
+    """Prefer a native transcript, then direct video, then downloaded audio."""
     client = create_gemini_client()
     try:
+        if SUPADATA_API_KEY:
+            try:
+                transcript = fetch_supadata_transcript(url)
+                return summarize_transcript(client, transcript), False
+            except Exception as transcript_error:
+                LOGGER.warning(
+                    "Supadata transcript path failed, using direct video: %s",
+                    transcript_error,
+                )
+        else:
+            LOGGER.warning("SUPADATA_API_KEY is not configured; skipping transcript")
         try:
             LOGGER.info("Starting direct YouTube analysis for %s", url)
             return summarize_youtube_url(client, url), False
@@ -339,7 +427,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status = await update.message.reply_text("⏳ Видео принято, ожидаю обработку…")
     async with PROCESSING_LOCK:
-        await status.edit_text("🤖 Анализирую видео целиком через Gemini…")
+        await status.edit_text("🔎 Получаю субтитры и создаю саммари…")
         try:
             with tempfile.TemporaryDirectory(prefix=f"summary-{video_id}-") as temp_dir:
                 temp_path = Path(temp_dir)
@@ -361,7 +449,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     try:
                         await status.edit_text(
-                            "🤖 Gemini анализирует видео…\n"
+                            "🤖 Видео обрабатывается…\n"
                             f"⏱ Прошло: {elapsed_minutes} мин."
                         )
                     except Exception as status_error:
